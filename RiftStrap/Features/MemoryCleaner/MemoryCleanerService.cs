@@ -9,7 +9,7 @@ namespace RiftStrap.Features.MemoryCleaner
         private static extern bool EmptyWorkingSet(IntPtr hProcess);
 
         [DllImport("kernel32.dll")]
-        private static extern bool SetProcessWorkingSetSize(IntPtr proc, int min, int max);
+        private static extern bool SetProcessWorkingSetSize(IntPtr proc, IntPtr min, IntPtr max);
 
         public int ThresholdMB { get; set; } = 2048;
         public int IntervalSeconds { get; set; } = 30;
@@ -30,7 +30,8 @@ namespace RiftStrap.Features.MemoryCleaner
             if (!AutoCleanEnabled) return;
 
             _cts = new CancellationTokenSource();
-            Task.Run(() => MonitorLoop(_cts.Token));
+            var token = _cts.Token;
+            Task.Run(() => MonitorLoop(token));
             App.Logger.WriteLine("MemoryCleaner", $"Started (threshold: {ThresholdMB}MB, interval: {IntervalSeconds}s)");
         }
 
@@ -57,7 +58,8 @@ namespace RiftStrap.Features.MemoryCleaner
                         var beforeMem = proc.WorkingSet64;
 
                         EmptyWorkingSet(proc.Handle);
-                        SetProcessWorkingSetSize(proc.Handle, -1, -1);
+                        // (-1,-1) as SIZE_T trims the working set; a 32-bit -1 zero-extends to 0xFFFFFFFF on x64 and fails
+                        SetProcessWorkingSetSize(proc.Handle, new IntPtr(-1), new IntPtr(-1));
 
                         proc.Refresh();
                         var afterMem = proc.WorkingSet64;

@@ -54,8 +54,9 @@ namespace RiftStrap.UI.Elements.Settings.Pages
                 return;
             }
 
-            ServerList.ItemsSource = result.Data;
-            LoadingText.Text = result.Data.Count == 0 ? "No servers found for this game." : "";
+            var servers = result.Data ?? new();   // a malformed response can leave Data null -> NRE
+            ServerList.ItemsSource = servers;
+            LoadingText.Text = servers.Count == 0 ? "No servers found for this game." : "";
 
             _nextCursor = result.NextPageCursor;
             _prevCursor = result.PreviousPageCursor;
@@ -113,7 +114,13 @@ namespace RiftStrap.UI.Elements.Settings.Pages
 
         private void ServerCard_Click(object sender, MouseButtonEventArgs e)
         {
-
+            // The row shows a Hand cursor implying it's clickable; join the row's server,
+            // matching the row-click-to-launch behaviour on the QuickLaunch/Screenshots pages.
+            if (sender is FrameworkElement { DataContext: ServerInfo server } && !string.IsNullOrEmpty(server.Id))
+            {
+                var url = ServerBrowserService.BuildJoinUrl(_currentPlaceId, server.Id);
+                Utilities.ShellExecute(url);
+            }
         }
     }
 }

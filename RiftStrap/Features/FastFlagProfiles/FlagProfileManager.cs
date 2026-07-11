@@ -10,6 +10,14 @@ namespace RiftStrap.Features.FastFlagProfiles
             Directory.CreateDirectory(ProfilesDir);
         }
 
+        // atomic write so a crash mid-write can't truncate a profile file
+        private static void WriteAtomic(string path, string contents)
+        {
+            string tmp = path + ".tmp";
+            File.WriteAllText(tmp, contents);
+            File.Move(tmp, path, true);
+        }
+
         public List<FlagProfile> GetProfiles()
         {
             var profiles = new List<FlagProfile>();
@@ -23,13 +31,16 @@ namespace RiftStrap.Features.FastFlagProfiles
                     if (profile != null)
                         profiles.Add(profile);
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    App.Logger.WriteLine("FlagProfiles", $"Skipped unreadable profile '{Path.GetFileName(file)}': {ex.Message}");
+                }
             }
 
             return profiles.OrderBy(p => p.Name).ToList();
         }
 
-        public FlagProfile SaveCurrentAsProfile(string name, string description = "")
+        public FlagProfile? SaveCurrentAsProfile(string name, string description = "")
         {
             var profile = new FlagProfile
             {
@@ -42,12 +53,13 @@ namespace RiftStrap.Features.FastFlagProfiles
             try
             {
                 var json = JsonSerializer.Serialize(profile, new JsonSerializerOptions { WriteIndented = true });
-                File.WriteAllText(Path.Combine(ProfilesDir, $"{profile.Id}.json"), json);
+                WriteAtomic(Path.Combine(ProfilesDir, $"{profile.Id}.json"), json);
                 App.Logger.WriteLine("FlagProfiles", $"Saved profile: {name} ({profile.Flags.Count} flags)");
             }
             catch (Exception ex)
             {
                 App.Logger.WriteLine("FlagProfiles", $"Failed to save profile {name}: {ex.Message}");
+                return null;
             }
 
             return profile;
@@ -69,6 +81,10 @@ namespace RiftStrap.Features.FastFlagProfiles
 
                 foreach (var (key, value) in profile.Flags)
                     App.FastFlags.SetValue(key, value);
+
+                // re-apply mandatory invariants that FastFlagManager.Load enforces,
+                // so loading a profile can't drop FFlagHandleAltEnterFullscreenManually
+                App.FastFlags.SetPreset("Rendering.ManualFullscreen", "False");
 
                 App.FastFlags.Save();
                 App.Logger.WriteLine("FlagProfiles", $"Loaded profile: {profile.Name}");
@@ -104,7 +120,13 @@ namespace RiftStrap.Features.FastFlagProfiles
                 var profile = JsonSerializer.Deserialize<FlagProfile>(json);
                 if (profile == null) return null;
 
-                var outPath = Path.Combine(outputDir, $"{profile.Name.Replace(" ", "_")}_flags.json");
+                var safeName = profile.Name;
+                foreach (var c in Path.GetInvalidFileNameChars())
+                    safeName = safeName.Replace(c, '_');
+                safeName = safeName.Replace(' ', '_');
+
+                var fileName = Path.GetFileName($"{safeName}_flags.json");
+                var outPath = Path.Combine(outputDir, fileName);
                 File.WriteAllText(outPath, json);
                 return outPath;
             }
@@ -125,7 +147,7 @@ namespace RiftStrap.Features.FastFlagProfiles
 
                 profile.Id = Guid.NewGuid().ToString("N")[..8];
                 var outJson = JsonSerializer.Serialize(profile, new JsonSerializerOptions { WriteIndented = true });
-                File.WriteAllText(Path.Combine(ProfilesDir, $"{profile.Id}.json"), outJson);
+                WriteAtomic(Path.Combine(ProfilesDir, $"{profile.Id}.json"), outJson);
 
                 return profile;
             }

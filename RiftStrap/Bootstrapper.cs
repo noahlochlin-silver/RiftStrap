@@ -30,7 +30,6 @@ namespace RiftStrap
             "	<BaseUrl>http://www.roblox.com</BaseUrl>\r\n" +
             "</Settings>\r\n";
 
-        private readonly FastZipEvents _fastZipEvents = new();
         private readonly CancellationTokenSource _cancelTokenSource = new();
 
         private IAppData AppData = default!;
@@ -69,18 +68,6 @@ namespace RiftStrap
         public Bootstrapper(LaunchMode launchMode)
         {
             _launchMode = launchMode;
-
-            _fastZipEvents.FileFailure += (_, e) =>
-            {
-
-                if (!e.Name.EndsWith(".ttf"))
-                    throw e.Exception;
-
-                App.Logger.WriteLine("FastZipEvents::OnFileFailure", $"Failed to extract {e.Name}");
-                _packageExtractionSuccess = false;
-            };
-            _fastZipEvents.DirectoryFailure += (_, e) => throw e.Exception;
-            _fastZipEvents.ProcessFile += (_, e) => e.ContinueRunning = !_cancelTokenSource.IsCancellationRequested;
 
             SetupAppData();
         }
@@ -218,7 +205,10 @@ namespace RiftStrap
 
             await SafeGetLatestVersionInfo();
 
-            CleanupVersionsFolder();
+            if (Utilities.DoesMutexExist(BackgroundUpdaterMutexName))
+                App.Logger.WriteLine(LOG_IDENT, "Background updater is active, skipping version folder cleanup");
+            else
+                CleanupVersionsFolder(_latestVersionGuid);
 
             bool allModificationsApplied = true;
 
@@ -606,14 +596,14 @@ namespace RiftStrap
             if (!Directory.Exists(rbxLogDir))
                 Directory.CreateDirectory(rbxLogDir);
 
-            var logWatcher = new FileSystemWatcher()
+            using var logWatcher = new FileSystemWatcher()
             {
                 Path = rbxLogDir,
                 Filter = "*.log",
                 EnableRaisingEvents = true
             };
 
-            var logCreatedEvent = new AutoResetEvent(false);
+            using var logCreatedEvent = new AutoResetEvent(false);
 
             logWatcher.Created += (_, e) =>
             {
@@ -621,6 +611,28 @@ namespace RiftStrap
                 logFileName = e.FullPath;
                 logCreatedEvent.Set();
             };
+
+            // Multi-instance: before the client starts, have a dedicated holder OWN
+            // ROBLOX_singletonMutex so no Roblox client owns it (otherwise launching a 2nd client
+            // makes Roblox close the 1st). The holder persists while any client runs and self-dedups.
+            App.Logger.WriteLine(LOG_IDENT, $"[MI] MultiInstanceLaunching={App.Settings.Prop.MultiInstanceLaunching}, IsStudioLaunch={IsStudioLaunch}");
+            if (App.Settings.Prop.MultiInstanceLaunching && !IsStudioLaunch)
+            {
+                try
+                {
+                    using var miReady = new EventWaitHandle(false, EventResetMode.ManualReset, "RiftStrap-MultiInstanceReady");
+                    miReady.Reset();   // clear any stale signal so we WAIT for THIS launch's holder to own the mutex
+                    Process.Start(Paths.Process, "-mutexholder");
+                    if (miReady.WaitOne(TimeSpan.FromSeconds(8)))
+                        App.Logger.WriteLine(LOG_IDENT, "Multi-instance singleton mutex holder is ready");
+                    else
+                        App.Logger.WriteLine(LOG_IDENT, "Timed out waiting for the multi-instance mutex holder");
+                }
+                catch (Exception ex)
+                {
+                    App.Logger.WriteLine(LOG_IDENT, $"Failed to start multi-instance mutex holder: {ex.Message}");
+                }
+            }
 
             try
             {
@@ -641,28 +653,9 @@ namespace RiftStrap
 
             App.Logger.WriteLine(LOG_IDENT, $"Started Roblox (PID {_appPid}), waiting for log file");
 
-            if (App.Settings.Prop.MultiInstanceLaunching)
-            {
-                Task.Run(() =>
-                {
-                    Thread.Sleep(3000);
-                    try
-                    {
-                        foreach (var name in new[] { "ROBLOX_singletonMutex", "ROBLOX_singletonEvent" })
-                        {
-                            if (EventWaitHandle.TryOpenExisting(name, out var handle))
-                            {
-                                handle.Close();
-                                App.Logger.WriteLine(LOG_IDENT, $"Closed {name} for multi-instance");
-                            }
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        App.Logger.WriteLine(LOG_IDENT, $"Multi-instance mutex cleanup failed: {ex.Message}");
-                    }
-                });
-            }
+            // Multi-instance is handled BEFORE Process.Start by a dedicated -mutexholder process
+            // (see the block above the Process.Start call). Closing a redundant handle here never
+            // released Roblox's own mutex, so the old cleanup block was removed.
 
             logCreatedEvent.WaitOne(TimeSpan.FromSeconds(15));
 
@@ -923,7 +916,7 @@ namespace RiftStrap
             }
         }
 
-        public static void CleanupVersionsFolder()
+        public static void CleanupVersionsFolder(string? keepVersionGuid = null)
         {
             const string LOG_IDENT = "Bootstrapper::CleanupVersionsFolder";
 
@@ -943,7 +936,7 @@ namespace RiftStrap
             {
                 string dirName = Path.GetFileName(dir);
 
-                if (dirName != App.PlayerState.Prop.VersionGuid && dirName != App.StudioState.Prop.VersionGuid)
+                if (dirName != App.PlayerState.Prop.VersionGuid && dirName != App.StudioState.Prop.VersionGuid && dirName != keepVersionGuid)
                 {
 
                     if (!TryDeleteRobloxInDirectory(dir))
@@ -1106,7 +1099,7 @@ namespace RiftStrap
                 _taskbarProgressIncrement = App.TaskbarProgressMaximum / (double)totalPackedSize;
             }
 
-            var extractionTasks = new List<Task>();
+            var extractionTasks = new List<Task<bool>>();
 
             foreach (var package in _versionPackageManifest)
             {
@@ -1131,7 +1124,10 @@ namespace RiftStrap
                 SetStatus(Strings.Bootstrapper_Status_Configuring);
             }
 
-            await Task.WhenAll(extractionTasks);
+            bool[] extractionResults = await Task.WhenAll(extractionTasks);
+
+            if (extractionResults.Any(result => !result))
+                _packageExtractionSuccess = false;
 
             App.Logger.WriteLine(LOG_IDENT, "Writing AppSettings.xml...");
             await File.WriteAllTextAsync(Path.Combine(_latestVersionDirectory, "AppSettings.xml"), AppSettings);
@@ -1147,7 +1143,7 @@ namespace RiftStrap
                 if (hklmKey is not null || hkcuKey is not null)
                 {
 
-                    App.State.Prop.PromptWebView2Install = true;
+                    App.State.Prop.PromptWebView2Install = false;
                 }
                 else
                 {
@@ -1234,7 +1230,7 @@ namespace RiftStrap
 
             AppData.DistributionState.Size = distributionSize;
 
-            int totalSize = App.PlayerState.Prop.Size + App.PlayerState.Prop.Size;
+            int totalSize = App.PlayerState.Prop.Size + App.StudioState.Prop.Size;
 
             using (var uninstallKey = Registry.CurrentUser.CreateSubKey(App.UninstallKey))
             {
@@ -1582,7 +1578,7 @@ namespace RiftStrap
             }
         }
 
-        private void ExtractPackage(Package package, List<string>? files = null)
+        private bool ExtractPackage(Package package, List<string>? files = null)
         {
             const string LOG_IDENT = "Bootstrapper::ExtractPackage";
 
@@ -1591,7 +1587,7 @@ namespace RiftStrap
             if (packageDir is null)
             {
                 App.Logger.WriteLine(LOG_IDENT, $"WARNING: {package.Name} was not found in the package map!");
-                return;
+                return true;
             }
 
             string packageFolder = Path.Combine(_latestVersionDirectory, packageDir);
@@ -1609,13 +1605,30 @@ namespace RiftStrap
 
             App.Logger.WriteLine(LOG_IDENT, $"Extracting {package.Name}...");
 
-            var fastZip = new FastZip(_fastZipEvents);
+            bool success = true;
+
+            var fastZipEvents = new FastZipEvents();
+            fastZipEvents.FileFailure += (_, e) =>
+            {
+
+                if (!e.Name.EndsWith(".ttf"))
+                    throw e.Exception;
+
+                App.Logger.WriteLine("FastZipEvents::OnFileFailure", $"Failed to extract {e.Name}");
+                success = false;
+            };
+            fastZipEvents.DirectoryFailure += (_, e) => throw e.Exception;
+            fastZipEvents.ProcessFile += (_, e) => e.ContinueRunning = !_cancelTokenSource.IsCancellationRequested;
+
+            var fastZip = new FastZip(fastZipEvents);
             fastZip.RestoreDateTimeOnExtract = false;
             fastZip.RestoreAttributesOnExtract = false;
 
             fastZip.ExtractZip(package.DownloadPath, packageFolder, fileFilter);
 
             App.Logger.WriteLine(LOG_IDENT, $"Finished extracting {package.Name}");
+
+            return success;
         }
     }
 }

@@ -68,7 +68,7 @@ namespace RiftStrap
             {
                 if (Prop.ContainsKey(key))
                 {
-                    if (key == Prop[key].ToString())
+                    if (value.ToString() == Prop[key].ToString())   // no-op only when the VALUE is unchanged
                         return;
 
                     App.Logger.WriteLine(LOG_IDENT, $"Changing of '{key}' from '{Prop[key]}' to '{value}' is pending");
@@ -134,25 +134,28 @@ namespace RiftStrap
             return mapping.First().Key;
         }
 
-        public override void Save()
+        public override bool Save()
         {
 
             foreach (var pair in Prop)
                 Prop[pair.Key] = pair.Value.ToString()!;
 
-            base.Save();
+            bool result = base.Save();
 
-            OriginalProp = new(Prop);
+            if (result)
+                OriginalProp = new(Prop);
+
+            return result;
         }
 
         public override bool Load(bool alertFailure = true)
         {
             bool result = base.Load(alertFailure);
 
-            OriginalProp = new(Prop);
-
             if (GetPreset("Rendering.ManualFullscreen") != "False")
                 SetPreset("Rendering.ManualFullscreen", "False");
+
+            OriginalProp = new(Prop);
 
             return result;
         }

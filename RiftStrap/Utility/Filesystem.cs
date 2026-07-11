@@ -11,14 +11,20 @@ namespace RiftStrap.Utility
     {
         internal static long GetFreeDiskSpace(string path)
         {
-            foreach (var drive in DriveInfo.GetDrives())
-            {
+            string? pathRoot = Path.GetPathRoot(path);
 
-                if (path.ToUpperInvariant().StartsWith(drive.Name))
-                    return drive.AvailableFreeSpace;
+            if (!string.IsNullOrEmpty(pathRoot))
+            {
+                foreach (var drive in DriveInfo.GetDrives())
+                {
+                    if (string.Equals(pathRoot, drive.Name, StringComparison.OrdinalIgnoreCase))
+                        return drive.AvailableFreeSpace;
+                }
             }
 
-            return -1;
+            // couldn't resolve the path to a known drive (e.g. UNC/network path);
+            // treat as 'unknown' rather than 'insufficient' so callers don't abort
+            return long.MaxValue;
         }
 
         internal static void AssertReadOnly(string filePath)
@@ -34,12 +40,20 @@ namespace RiftStrap.Utility
 
         internal static void AssertReadOnlyDirectory(string directoryPath)
         {
-            var directory = new DirectoryInfo(directoryPath) { Attributes = FileAttributes.Normal };
+            var directory = new DirectoryInfo(directoryPath);
+
+            if (!directory.Exists)   // setting Attributes on a missing directory throws
+                return;
+
+            // clear ONLY the read-only bit; setting FileAttributes.Normal clobbered Hidden/System/etc.
+            try { directory.Attributes &= ~FileAttributes.ReadOnly; } catch { }
 
             foreach (var info in directory.GetFileSystemInfos("*", SearchOption.AllDirectories))
-                info.Attributes = FileAttributes.Normal;
+            {
+                try { info.Attributes &= ~FileAttributes.ReadOnly; } catch { }
+            }
 
-            App.Logger.WriteLine("Filesystem::AssertReadOnlyDirectory", $"The following directory was set as read-only: {directoryPath}");
+            App.Logger.WriteLine("Filesystem::AssertReadOnlyDirectory", $"The following directory was cleared of read-only: {directoryPath}");
         }
     }
 }

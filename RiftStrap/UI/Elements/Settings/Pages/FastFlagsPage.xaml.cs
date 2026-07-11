@@ -42,6 +42,10 @@ namespace RiftStrap.UI.Elements.Settings.Pages
             var sb = (Storyboard)FindResource("SectionEntrance");
             sb.Begin(this, true);
 
+            // Populate the profile dropdown every time the page opens, otherwise the
+            // Load/Delete buttons stay dead until the user saves a new profile in-session.
+            RefreshProfiles();
+
             if (!_initialLoad)
             {
                 _initialLoad = true;
@@ -70,9 +74,13 @@ namespace RiftStrap.UI.Elements.Settings.Pages
             var name = UI.Controls.Rift.RiftInputDialog.Show("Save FastFlag Profile", "Profile name:", "My Profile");
             if (string.IsNullOrEmpty(name)) return;
 
-            _profileManager.SaveCurrentAsProfile(name);
+            var saved = _profileManager.SaveCurrentAsProfile(name);
             RefreshProfiles();
-            Frontend.ShowMessageBox($"Profile \"{name}\" saved ({App.FastFlags.Prop.Count} flags).", MessageBoxImage.Information);
+
+            if (saved != null)
+                Frontend.ShowMessageBox($"Profile \"{name}\" saved ({App.FastFlags.Prop.Count} flags).", MessageBoxImage.Information);
+            else
+                Frontend.ShowMessageBox($"Failed to save profile \"{name}\". See logs for details.", MessageBoxImage.Error);
         }
 
         private void LoadProfile_Click(object sender, RoutedEventArgs e)

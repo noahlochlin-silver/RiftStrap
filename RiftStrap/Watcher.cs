@@ -75,13 +75,20 @@ namespace RiftStrap
             {
                 ActivityWatcher = new(_watcherData.LogFile);
 
+                // Wire the auto-rejoin service from settings — it was previously never enabled,
+                // so HandleDisconnectAsync always returned at its first guard and the feature
+                // could never fire for anyone.
+                _autoRejoin.Enabled = App.Settings.Prop.AutoRejoinEnabled;
+                _autoRejoin.RejoinOnKick = App.Settings.Prop.AutoRejoinOnKick;
+
                 if (App.Settings.Prop.UseDisableAppPatch)
                 {
                     ActivityWatcher.OnAppClose += delegate
                     {
                         App.Logger.WriteLine(LOG_IDENT, "Received desktop app exit, closing Roblox");
-                        using var process = Process.GetProcessById(_watcherData.ProcessId);
-                        process.CloseMainWindow();
+                        // CloseProcess swallows the case where the client has already exited;
+                        // Process.GetProcessById would throw ArgumentException out of this handler.
+                        CloseProcess(_watcherData.ProcessId);
                     };
                 }
 
@@ -135,6 +142,10 @@ namespace RiftStrap
                 ActivityWatcher.OnGameLeave += (_, _) =>
                 {
                     _gameProfiles.OnGameLeave();
+                    // Clear AutoRejoin session state on leave — otherwise _lastPlaceId stays set and a
+                    // stray disconnect line while out-of-game would trigger a false rejoin to the game
+                    // the user deliberately left. (Any in-flight rejoin already snapshotted its target.)
+                    _autoRejoin.Clear();
                     _pluginHost.NotifyGameLeave();
                     _analytics.EndSession();
                     _perfMonitor.Stop();
@@ -165,6 +176,17 @@ namespace RiftStrap
 
             _notifications.Start();
             _memoryCleaner.Start();
+            // Enforce the daily play-time limit: nothing subscribed to these events, so the limit and
+            // break reminders did nothing (bug: "daily limit never enforced"). Surface reminders as tray
+            // balloons; on hitting the daily limit, notify and close the Roblox client.
+            _timeLimiter.OnReminder += msg =>
+                Frontend.ShowBalloonTip("RiftStrap", msg, System.Windows.Forms.ToolTipIcon.Info);
+            _timeLimiter.OnLimitReached += () =>
+            {
+                Frontend.ShowBalloonTip("RiftStrap", "Daily play-time limit reached - closing Roblox.",
+                    System.Windows.Forms.ToolTipIcon.Warning);
+                KillRobloxProcess();
+            };
             _timeLimiter.StartSession();
             _screenshotService.StartWatching();
 
@@ -210,7 +232,7 @@ namespace RiftStrap
 
             ActivityWatcher?.Start();
 
-            while (Utilities.GetProcessesSafe().Any(x => x.Id == _watcherData.ProcessId))
+            while (Utilities.IsProcessRunning(_watcherData.ProcessId))
                 await Task.Delay(1000);
 
             if (_watcherData.AutoclosePids is not null)
@@ -232,8 +254,21 @@ namespace RiftStrap
             _memoryCleaner.Dispose();
             _timeLimiter.Dispose();
             _pluginHost.Dispose();
+            _screenshotService.Dispose();
             _notifyIcon?.Dispose();
             RichPresence?.Dispose();
+
+            // Mutex has thread-affinity: if Dispose runs on a thread other than the one
+            // that acquired the lock, ReleaseMutex throws. Swallow it so a failed release
+            // cannot propagate out of Dispose and skip App.Terminate()/fault reporting.
+            try
+            {
+                _lock.Dispose();
+            }
+            catch (Exception ex)
+            {
+                App.Logger.WriteException("Watcher::Dispose", ex);
+            }
 
             GC.SuppressFinalize(this);
         }
