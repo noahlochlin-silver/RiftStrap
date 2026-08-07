@@ -10,6 +10,10 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    # the release step needs write access to create the release and upload the exe;
+    # without it GITHUB_TOKEN is read-only and the upload fails with 403.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
