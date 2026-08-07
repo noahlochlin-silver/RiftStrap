@@ -24,10 +24,10 @@ jobs:
         run: dotnet restore RiftStrap.sln
 
       - name: Build
-        run: dotnet build RiftStrap.sln -c Release --no-restore
+        run: dotnet build RiftStrap.sln -c Release --no-restore -p:CommitHash=${{ github.sha }} -p:CommitRef=${{ github.ref_type }}/${{ github.ref_name }}
 
       - name: Publish
-        run: dotnet publish RiftStrap/RiftStrap.csproj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o publish
+        run: dotnet publish RiftStrap/RiftStrap.csproj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:CommitHash=${{ github.sha }} -p:CommitRef=${{ github.ref_type }}/${{ github.ref_name }} -o publish
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
