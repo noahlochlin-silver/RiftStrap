@@ -838,18 +838,56 @@ namespace RiftStrap
 #else
                 var asset = releaseInfo.Assets![0];
 
-                string downloadLocation = Path.Combine(Paths.TempUpdates, asset.Name);
+                // Every release ships an asset with the SAME name, so caching by name alone meant
+                // anyone who had updated once kept re-running the first build they ever downloaded:
+                // File.Exists was true, the download was skipped, and the "update" relaunched the old
+                // binary forever. Scope the cache by tag so two releases can never collide.
+                string versionDir = Path.Combine(Paths.TempUpdates, releaseInfo.TagName);
+                string downloadLocation = Path.Combine(versionDir, asset.Name);
 
-                Directory.CreateDirectory(Paths.TempUpdates);
+                Directory.CreateDirectory(versionDir);
 
                 App.Logger.WriteLine(LOG_IDENT, $"Downloading {releaseInfo.TagName}...");
 
-                if (!File.Exists(downloadLocation))
+                // A previous run can leave a truncated file behind; treat anything implausibly small
+                // as absent rather than executing a partial download.
+                bool cached = File.Exists(downloadLocation) && new FileInfo(downloadLocation).Length > 1024 * 1024;
+
+                if (!cached)
                 {
                     var response = await App.HttpClient.GetAsync(asset.BrowserDownloadUrl);
+                    response.EnsureSuccessStatusCode();
 
-                    await using var fileStream = new FileStream(downloadLocation, FileMode.OpenOrCreate, FileAccess.Write);
-                    await response.Content.CopyToAsync(fileStream);
+                    // FileMode.Create truncates: OpenOrCreate would leave trailing bytes of an older,
+                    // longer file when the new one is shorter.
+                    await using (var fileStream = new FileStream(downloadLocation, FileMode.Create, FileAccess.Write))
+                        await response.Content.CopyToAsync(fileStream);
+
+                    long written = new FileInfo(downloadLocation).Length;
+                    if (written < 1024 * 1024)
+                        throw new IOException($"Downloaded update is only {written} bytes; refusing to run it.");
+
+                    App.Logger.WriteLine(LOG_IDENT, $"Downloaded {written} bytes for {releaseInfo.TagName}");
+                }
+                else
+                {
+                    App.Logger.WriteLine(LOG_IDENT, $"Reusing cached download for {releaseInfo.TagName}");
+                }
+
+                // Drop caches from other versions so TempUpdates does not grow without bound.
+                try
+                {
+                    foreach (var dir in Directory.GetDirectories(Paths.TempUpdates))
+                    {
+                        if (!string.Equals(Path.GetFileName(dir), releaseInfo.TagName, StringComparison.Ordinal))
+                            Directory.Delete(dir, true);
+                    }
+                    foreach (var stale in Directory.GetFiles(Paths.TempUpdates))
+                        File.Delete(stale);
+                }
+                catch (Exception ex)
+                {
+                    App.Logger.WriteLine(LOG_IDENT, $"Could not prune old update caches: {ex.Message}");
                 }
 #endif
 
