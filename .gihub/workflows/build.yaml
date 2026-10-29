@@ -1,1 +1,25 @@
+name: Cloud Build Self-Contained EXE
+on:
+workflow_dispatch: # Allows you to manually click a button to start the build
+jobs:
+build:
+runs-on: windows-latest
+steps:
+name: Checkout Code
+uses: actions/checkout@v4
+with:
+submodules: recursive # Crucial for projects like RiftStrap that use submodules
+name: Setup .NET SDK
+uses: actions/setup-dotnet@v4
+with:
+dotnet-version: '8.0.x' # RiftStrap relies on the .NET 8 runtime environment
+name: Compile & Embed Runtime
+run: |
+dotnet publish RiftStrap/RiftStrap.csproj -c Release -r win-x64 -p:PublishSingleFile=true -p:SelfContained=true -p:IncludeNativeLibrariesForSelfContained=true -o ./compiled_output
+name: Package Output EXE
+uses: actions/upload-artifact@v4
+with:
+name: RiftStrap-Embedded-Windows
+path: ./compiled_output/
+
 
